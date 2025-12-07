@@ -171,6 +171,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
         txtDownloadStatus.text = "Starting download..."
         txtDownloadPercent.text = "0%"
         progressDownload.progress = 0
+        progressDownload.isIndeterminate = false
         isDownloading = true
 
         currentDownloadThread = Thread {
@@ -186,29 +187,56 @@ class VideoDownloaderActivity : AppCompatActivity() {
                     throw Exception("HTTP error code: ${response.code}")
                 }
 
-                // Your snippet integrated here
-                val body = response.body ?: return@Thread
-                val totalBytes = body.contentLength()
+                val body = response.body ?: throw Exception("Empty response body")
+                val totalBytes = body.contentLength() // can be -1 if unknown
                 var downloadedBytes = 0L
 
                 val inputStream = body.byteStream()
                 val outputStream = FileOutputStream(outFile)
 
                 val buffer = ByteArray(8192)
-                var bytesRead: Int = 0
 
-                while (isDownloading && inputStream.read(buffer).also { bytesRead = it } != -1) {
+                // For speed calculation
+                val startTime = System.currentTimeMillis()
+                var lastUiUpdateTime = startTime
+
+                var done = false
+
+                while (isDownloading && !Thread.currentThread().isInterrupted) {
+                    val bytesRead = inputStream.read(buffer)
+                    if (bytesRead == -1) {
+                        done = true
+                        break
+                    }
 
                     outputStream.write(buffer, 0, bytesRead)
-
                     downloadedBytes += bytesRead
 
-                    if (totalBytes > 0) {
-                        val progress = (downloadedBytes * 100 / totalBytes).toInt()
+                    val now = System.currentTimeMillis()
+                    // Update UI at most every 500ms (or on completion)
+                    if (now - lastUiUpdateTime >= 500) {
+                        lastUiUpdateTime = now
+
+                        val elapsedSec = (now - startTime) / 1000.0
+                        val speedBytesPerSec =
+                            if (elapsedSec > 0) downloadedBytes / elapsedSec else 0.0
+                        val speedText = humanReadableSpeed(speedBytesPerSec)
+
                         handler.post {
-                            progressDownload.progress = progress
-                            txtDownloadPercent.text = "$progress%"
-                            txtDownloadStatus.text = "Downloading..."
+                            txtDownloadStatus.text = "Downloading... ($speedText)"
+
+                            if (totalBytes > 0) {
+                                // Proper percentage when content-length is known
+                                val progress = (downloadedBytes * 100 / totalBytes).toInt()
+                                progressDownload.isIndeterminate = false
+                                progressDownload.progress = progress
+                                txtDownloadPercent.text = "$progress%"
+                            } else {
+                                // Unknown file size – show how much is downloaded
+                                progressDownload.isIndeterminate = true
+                                txtDownloadPercent.text =
+                                    "${humanReadableSize(downloadedBytes)} downloaded"
+                            }
                         }
                     }
                 }
@@ -225,6 +253,16 @@ class VideoDownloaderActivity : AppCompatActivity() {
                     return@Thread
                 }
 
+                if (!done) {
+                    // Thread ended for some reason (interrupted / error)
+                    handler.post {
+                        isDownloading = false
+                        txtDownloadStatus.text = "Download stopped unexpectedly"
+                        Toast.makeText(this, "Download stopped", Toast.LENGTH_LONG).show()
+                    }
+                    return@Thread
+                }
+
                 // Mark done and prepare URI for opening
                 val uri = FileProvider.getUriForFile(
                     this,
@@ -237,6 +275,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
                     isDownloading = false
                     txtDownloadStatus.text = "Download complete"
                     txtDownloadPercent.text = "100%"
+                    progressDownload.isIndeterminate = false
                     progressDownload.progress = 100
                     showOpenInGalleryDialog()
                 }
@@ -281,5 +320,32 @@ class VideoDownloaderActivity : AppCompatActivity() {
             }
             startActivity(intent)
         }
+    }
+
+    // ===== Helpers for nice text output =====
+
+    private fun humanReadableSpeed(bytesPerSec: Double): String {
+        if (bytesPerSec <= 0.0) return "0 KB/s"
+
+        val kilo = 1024.0
+        val mega = kilo * 1024
+        val giga = mega * 1024
+
+        return when {
+            bytesPerSec >= giga -> String.format("%.2f GB/s", bytesPerSec / giga)
+            bytesPerSec >= mega -> String.format("%.2f MB/s", bytesPerSec / mega)
+            bytesPerSec >= kilo -> String.format("%.2f KB/s", bytesPerSec / kilo)
+            else -> String.format("%.0f B/s", bytesPerSec)
+        }
+    }
+
+    private fun humanReadableSize(bytes: Long): String {
+        if (bytes < 1024) return "$bytes B"
+        val z = (63 - java.lang.Long.numberOfLeadingZeros(bytes)) / 10
+        return String.format(
+            "%.1f %sB",
+            bytes.toDouble() / (1L shl (z * 10)),
+            " KMGTPE"[z]
+        )
     }
 }

@@ -45,6 +45,9 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)
 
+    // Image loading for thumbnails
+
+
     // OkHttp (used for actual video download)
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
 
