@@ -6,8 +6,8 @@ plugins {
 android {
     namespace = "com.example.bluematrix"
 
-    // ✅ just an Int, no block, no release()
-    compileSdk = 36
+    // just an Int, no block, no release()
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.bluematrix"
