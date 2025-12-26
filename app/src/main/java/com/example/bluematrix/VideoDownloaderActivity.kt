@@ -254,7 +254,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
                 }
 
                 if (!done) {
-                    // Thread ended for some reason (interrupted / error)
+                    // Thread ended for some reason (interrupted /  for error)
                     handler.post {
                         isDownloading = false
                         txtDownloadStatus.text = "Download stopped unexpectedly"
