@@ -254,7 +254,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
                 }
 
                 if (!done) {
-                    // Thread ended for some reason (interrupted /  for error)
+                    // Thread ended for some reason (interrupted / error)
                     handler.post {
                         isDownloading = false
                         txtDownloadStatus.text = "Download stopped unexpectedly"
@@ -263,7 +263,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
                     return@Thread
                 }
 
-                // Mark done and prepare URI for opening
+                // Mark done and prepare URI to opening
                 val uri = FileProvider.getUriForFile(
                     this,
                     "${applicationContext.packageName}.fileprovider",
