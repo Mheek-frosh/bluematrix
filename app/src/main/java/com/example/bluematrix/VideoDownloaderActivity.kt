@@ -263,7 +263,7 @@ class VideoDownloaderActivity : AppCompatActivity() {
                     return@Thread
                 }
 
-                // Mark done and prepare URI for opening
+                // Mark done and prepare URI to opening
                 val uri = FileProvider.getUriForFile(
                     this,
                     "${applicationContext.packageName}.fileprovider",
