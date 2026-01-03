@@ -7,7 +7,7 @@ android {
     namespace = "com.example.bluematrix"
 
     // just an Int, no block, no release()
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.bluematrix"
