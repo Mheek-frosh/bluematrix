@@ -1,12 +1,12 @@
 package com.example.bluematrix
 
 import android.content.Intent
-import android.media.MediaMetadataRetriever
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
-import android.os.Handler
-import android.os.Looper
+import android.view.View
 import android.webkit.URLUtil
 import android.widget.Button
 import android.widget.EditText
@@ -17,18 +17,25 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import com.github.youtubedl_android.YoutubeDL
+import com.github.youtubedl_android.YoutubeDLRequest
+import kotlinx.coroutines.*
+import okhttp3.*
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 
 class VideoDownloaderActivity : AppCompatActivity() {
 
-    private val okHttpClient = OkHttpClient()
+    private val okHttpClient = OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
-    private var lastDownloadedUri: Uri? = null
-    private var currentDownloadThread: Thread? = null
-    private val handler = Handler(Looper.getMainLooper())
+    private var lastDownloadedFile: File? = null
+    private var currentDownloadCall: Call? = null
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private lateinit var edtVideoUrl: EditText
     private lateinit var txtDownloadStatus: TextView
@@ -40,6 +47,9 @@ class VideoDownloaderActivity : AppCompatActivity() {
     private lateinit var imgThumbnail: ImageView
 
     private var isDownloading = false
+
+    // API Keys (replace with your own from RapidAPI)
+    private val instagramApiKey = "422d2d3f9emsh073d587da04581ep147d5bjsn51e5073df06c"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,10 +68,10 @@ class VideoDownloaderActivity : AppCompatActivity() {
             val url = edtVideoUrl.text.toString().trim()
             if (url.isEmpty()) {
                 Toast.makeText(this, "Enter a video URL first", Toast.LENGTH_SHORT).show()
-            } else if (!url.startsWith("http")) {
-                Toast.makeText(this, "Invalid URL. It must start with http or https.", Toast.LENGTH_SHORT).show()
+            } else if (!isValidUrl(url)) {
+                Toast.makeText(this, "Invalid URL", Toast.LENGTH_SHORT).show()
             } else {
-                loadThumbnailPreview(url)
+                loadThumbnail(url)
             }
         }
 
@@ -69,24 +79,17 @@ class VideoDownloaderActivity : AppCompatActivity() {
             val url = edtVideoUrl.text.toString().trim()
             if (url.isEmpty()) {
                 Toast.makeText(this, "Please enter a video URL", Toast.LENGTH_SHORT).show()
-            } else if (!url.startsWith("http")) {
-                Toast.makeText(this, "Invalid URL. It must start with http or https.", Toast.LENGTH_SHORT).show()
+            } else if (!isValidUrl(url)) {
+                Toast.makeText(this, "Invalid URL", Toast.LENGTH_SHORT).show()
             } else {
-                startDownloadWithOkHttp(url)
+                extractAndDownload(url)
             }
         }
 
         btnPauseResume.setOnClickListener {
-            // Simple: cancel the active download
             if (isDownloading) {
                 cancelDownload()
-                Toast.makeText(this, "Download cancelled.", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(
-                    this,
-                    "To resume, tap Download again. (True resume with byte ranges is more advanced.)",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(this, "Download cancelled", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -94,79 +97,254 @@ class VideoDownloaderActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cancelDownload()
+        scope.cancel()
     }
 
     private fun cancelDownload() {
         isDownloading = false
-        currentDownloadThread?.interrupt()
-        currentDownloadThread = null
+        currentDownloadCall?.cancel()
     }
 
-    /**
-     * Load a thumbnail from the remote video URL using MediaMetadataRetriever.
-     * This may not work for all streaming/protected URLs, but will work for many direct URLs.
-     */
-    private fun loadThumbnailPreview(url: String) {
-        txtDownloadStatus.text = "Loading preview..."
-        imgThumbnail.setImageBitmap(null)
+    private fun isValidUrl(url: String): Boolean {
+        return url.startsWith("http://") || url.startsWith("https://")
+    }
 
-        Thread {
+    private fun loadThumbnail(url: String) {
+        imgThumbnail.visibility = View.VISIBLE
+        imgThumbnail.setImageResource(android.R.drawable.ic_menu_gallery) // Placeholder
+
+        scope.launch {
             try {
-                val retriever = MediaMetadataRetriever()
-                // For network URLs, use the setDataSource(String, Map<String, String>?)
-                retriever.setDataSource(url, HashMap())
+                val thumbnailUrl = withContext(Dispatchers.IO) {
+                    when {
+                        url.contains("youtube.com") || url.contains("youtu.be") -> {
+                            getYouTubeThumbnail(url)
+                        }
+                        url.contains("instagram.com") || url.contains("instagram") -> {
+                            getInstagramThumbnail(url)
+                        }
+                        else -> ""
+                    }
+                }
 
-                // Get a frame at time 0 (or you could use another timestamp)
-                val bitmap = retriever.frameAtTime
-                retriever.release()
-
-                if (bitmap != null) {
-                    handler.post {
+                if (thumbnailUrl.isNotEmpty()) {
+                    val bitmap = withContext(Dispatchers.IO) {
+                        downloadImage(thumbnailUrl)
+                    }
+                    if (bitmap != null) {
                         imgThumbnail.setImageBitmap(bitmap)
-                        txtDownloadStatus.text = "Preview loaded"
+                        Toast.makeText(this@VideoDownloaderActivity, "Thumbnail loaded", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@VideoDownloaderActivity, "Failed to load thumbnail", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    handler.post {
-                        txtDownloadStatus.text = "Could not load preview"
-                        Toast.makeText(
-                            this@VideoDownloaderActivity,
-                            "Preview not available for this video.",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    Toast.makeText(this@VideoDownloaderActivity, "Thumbnail not available", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                handler.post {
-                    txtDownloadStatus.text = "Preview failed"
-                    Toast.makeText(
-                        this@VideoDownloaderActivity,
-                        "Preview not supported for this URL.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
+                Toast.makeText(this@VideoDownloaderActivity, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
             }
-        }.start()
+        }
     }
 
-    private fun startDownloadWithOkHttp(url: String) {
+    private fun getYouTubeThumbnail(url: String): String {
+        val videoId = extractYouTubeId(url)
+        if (videoId.isEmpty()) return ""
+
+        val thumbnails = listOf(
+            "https://img.youtube.com/vi/$videoId/maxresdefault.jpg",
+            "https://img.youtube.com/vi/$videoId/hqdefault.jpg",
+            "https://img.youtube.com/vi/$videoId/mqdefault.jpg"
+        )
+
+        for (thumbUrl in thumbnails) {
+            if (isThumbnailAccessible(thumbUrl)) return thumbUrl
+        }
+        return ""
+    }
+
+    private fun isThumbnailAccessible(url: String): Boolean {
+        return try {
+            val request = Request.Builder().url(url).head().build()
+            val response = okHttpClient.newCall(request).execute()
+            response.isSuccessful
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun extractYouTubeId(url: String): String {
+        val patterns = listOf(
+            "(?<=watch\\?v=)[^&]+",
+            "(?<=youtu.be/)[^&?]+",
+            "(?<=embed/)[^&?]+"
+        )
+
+        for (pattern in patterns) {
+            val regex = Regex(pattern)
+            val match = regex.find(url)
+            if (match != null) return match.value
+        }
+        return ""
+    }
+
+    private fun getInstagramThumbnail(url: String): String {
+        try {
+            val request = Request.Builder()
+                .url("https://instagram-downloader-download-instagram-videos-stories.p.rapidapi.com/index?url=${Uri.encode(url)}")
+                .addHeader("X-RapidAPI-Key", instagramApiKey)
+                .addHeader("X-RapidAPI-Host", "instagram-downloader-download-instagram-videos-stories.p.rapidapi.com")
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: ""
+
+            if (response.isSuccessful && responseBody.isNotEmpty()) {
+                val json = JSONObject(responseBody)
+                var thumbnailUrl = json.optString("thumbnail", "")
+                if (thumbnailUrl.isEmpty()) thumbnailUrl = json.optString("thumb", "")
+                if (thumbnailUrl.isEmpty()) thumbnailUrl = json.optString("thumbnail_url", "")
+                if (thumbnailUrl.isEmpty()) {
+                    val media = json.optJSONArray("media")
+                    if (media != null && media.length() > 0) {
+                        thumbnailUrl = media.getJSONObject(0).optString("thumbnail", "")
+                    }
+                }
+                return thumbnailUrl
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return ""
+    }
+
+    private fun downloadImage(imageUrl: String): Bitmap? {
+        return try {
+            val request = Request.Builder()
+                .url(imageUrl)
+                .addHeader("User-Agent", "Mozilla/5.0")
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            if (response.isSuccessful) {
+                val inputStream = response.body?.byteStream()
+                BitmapFactory.decodeStream(inputStream)
+            } else null
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    private fun extractAndDownload(url: String) {
+        txtDownloadStatus.text = "Extracting video URL..."
+        progressDownload.isIndeterminate = true
+
+        scope.launch {
+            try {
+                val downloadUrl = withContext(Dispatchers.IO) {
+                    when {
+                        url.contains("youtube.com") || url.contains("youtu.be") -> extractYouTubeUrl(url)
+                        url.contains("instagram.com") || url.contains("instagram") -> extractInstagramUrl(url)
+                        else -> url
+                    }
+                }
+
+                if (downloadUrl.isNotEmpty()) startDirectDownload(downloadUrl)
+                else throw Exception("Could not extract video URL")
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+                progressDownload.isIndeterminate = false
+                txtDownloadStatus.text = "Extraction failed: ${e.message}"
+                showErrorDialog(url)
+            }
+        }
+    }
+
+    private fun extractYouTubeUrl(url: String): String {
+        return try {
+            val request = YoutubeDLRequest(url)
+            request.addOption("-f", "best[height<=720]")
+            val result = YoutubeDL.getInstance().execute(request)
+            val json = JSONObject(result.out)
+            json.getJSONArray("formats").getJSONObject(0).getString("url")
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ""
+        }
+    }
+
+    private fun extractInstagramUrl(url: String): String {
+        return try {
+            val request = Request.Builder()
+                .url("https://instagram-downloader-download-instagram-videos-stories.p.rapidapi.com/index?url=${Uri.encode(url)}")
+                .addHeader("X-RapidAPI-Key", instagramApiKey)
+                .addHeader("X-RapidAPI-Host", "instagram-downloader-download-instagram-videos-stories.p.rapidapi.com")
+                .build()
+
+            val response = okHttpClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: ""
+            if (response.isSuccessful && responseBody.isNotEmpty()) {
+                val json = JSONObject(responseBody)
+                var videoUrl = json.optString("video_url", "")
+                if (videoUrl.isEmpty()) videoUrl = json.optString("url", "")
+                if (videoUrl.isEmpty()) {
+                    val media = json.optJSONArray("media")
+                    if (media != null && media.length() > 0) {
+                        videoUrl = media.getJSONObject(0).optString("url", "")
+                    }
+                }
+                videoUrl
+            } else ""
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ""
+        }
+    }
+
+    private fun showErrorDialog(originalUrl: String) {
+        val platform = when {
+            originalUrl.contains("instagram") -> "Instagram"
+            originalUrl.contains("youtube") || originalUrl.contains("youtu.be") -> "YouTube"
+            else -> "this platform"
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Extraction Failed")
+            .setMessage(
+                """
+                Unable to extract video from $platform.
+                
+                Possible reasons:
+                • Invalid or expired URL
+                • Private content
+                • API limitation or change
+                
+                Try:
+                1. Use another public link
+                2. Check your API key
+                3. Try again later
+                """.trimIndent()
+            )
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun startDirectDownload(downloadUrl: String) {
         if (isDownloading) {
-            Toast.makeText(this, "A download is already in progress", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Download already in progress", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val externalMoviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-        if (externalMoviesDir == null) {
-            Toast.makeText(this, "Cannot access external files directory.", Toast.LENGTH_LONG).show()
+        val downloadsDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: run {
+            Toast.makeText(this, "Cannot access storage", Toast.LENGTH_LONG).show()
             return
         }
 
-        if (!externalMoviesDir.exists()) {
-            externalMoviesDir.mkdirs()
-        }
-
-        val fileName = URLUtil.guessFileName(url, null, null)
-        val outFile = File(externalMoviesDir, fileName)
+        if (!downloadsDir.exists()) downloadsDir.mkdirs()
+        val fileName = URLUtil.guessFileName(downloadUrl, null, null)
+        val outFile = File(downloadsDir, fileName)
 
         txtDownloadStatus.text = "Starting download..."
         txtDownloadPercent.text = "0%"
@@ -174,178 +352,90 @@ class VideoDownloaderActivity : AppCompatActivity() {
         progressDownload.isIndeterminate = false
         isDownloading = true
 
-        currentDownloadThread = Thread {
-
+        scope.launch(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
-                    .url(url)
+                    .url(downloadUrl)
+                    .addHeader("User-Agent", "Mozilla/5.0")
                     .build()
 
-                val response = okHttpClient.newCall(request).execute()
+                currentDownloadCall = okHttpClient.newCall(request)
+                val response = currentDownloadCall!!.execute()
 
-                if (!response.isSuccessful) {
-                    throw Exception("HTTP error code: ${response.code}")
-                }
+                if (!response.isSuccessful) throw IOException("HTTP error ${response.code}")
 
-                val body = response.body ?: throw Exception("Empty response body")
-                val totalBytes = body.contentLength() // can be -1 if unknown
+                val body = response.body ?: throw IOException("Empty response")
+                val totalBytes = body.contentLength()
                 var downloadedBytes = 0L
 
                 val inputStream = body.byteStream()
                 val outputStream = FileOutputStream(outFile)
-
                 val buffer = ByteArray(8192)
 
-                // For speed calculation
-                val startTime = System.currentTimeMillis()
-                var lastUiUpdateTime = startTime
-
-                var done = false
-
-                while (isDownloading && !Thread.currentThread().isInterrupted) {
+                while (isDownloading) {
                     val bytesRead = inputStream.read(buffer)
-                    if (bytesRead == -1) {
-                        done = true
-                        break
-                    }
-
+                    if (bytesRead == -1) break
                     outputStream.write(buffer, 0, bytesRead)
                     downloadedBytes += bytesRead
 
-                    val now = System.currentTimeMillis()
-                    // Update UI at most every 500ms (or on completion)
-                    if (now - lastUiUpdateTime >= 500) {
-                        lastUiUpdateTime = now
-
-                        val elapsedSec = (now - startTime) / 1000.0
-                        val speedBytesPerSec =
-                            if (elapsedSec > 0) downloadedBytes / elapsedSec else 0.0
-                        val speedText = humanReadableSpeed(speedBytesPerSec)
-
-                        handler.post {
-                            txtDownloadStatus.text = "Downloading... ($speedText)"
-
-                            if (totalBytes > 0) {
-                                // Proper percentage when content-length is known
-                                val progress = (downloadedBytes * 100 / totalBytes).toInt()
-                                progressDownload.isIndeterminate = false
-                                progressDownload.progress = progress
-                                txtDownloadPercent.text = "$progress%"
-                            } else {
-                                // Unknown file size – show how much is downloaded
-                                progressDownload.isIndeterminate = true
-                                txtDownloadPercent.text =
-                                    "${humanReadableSize(downloadedBytes)} downloaded"
-                            }
+                    withContext(Dispatchers.Main) {
+                        if (totalBytes > 0) {
+                            val progress = (downloadedBytes * 100 / totalBytes).toInt()
+                            progressDownload.progress = progress
+                            txtDownloadPercent.text = "$progress%"
                         }
                     }
                 }
 
-                outputStream.flush()
                 outputStream.close()
                 inputStream.close()
 
-                if (!isDownloading) {
-                    // Cancelled
-                    handler.post {
-                        txtDownloadStatus.text = "Download cancelled"
-                    }
-                    return@Thread
-                }
-
-                if (!done) {
-                    // Thread ended for some reason (interrupted / error)
-                    handler.post {
-                        isDownloading = false
-                        txtDownloadStatus.text = "Download stopped unexpectedly"
-                        Toast.makeText(this, "Download stopped", Toast.LENGTH_LONG).show()
-                    }
-                    return@Thread
-                }
-
-                // Mark done and prepare URI to opening
-                val uri = FileProvider.getUriForFile(
-                    this,
-                    "${applicationContext.packageName}.fileprovider",
-                    outFile
-                )
-                lastDownloadedUri = uri
-
-                handler.post {
+                if (isDownloading) {
                     isDownloading = false
-                    txtDownloadStatus.text = "Download complete"
-                    txtDownloadPercent.text = "100%"
-                    progressDownload.isIndeterminate = false
-                    progressDownload.progress = 100
-                    showOpenInGalleryDialog()
+                    lastDownloadedFile = outFile
+                    withContext(Dispatchers.Main) {
+                        txtDownloadStatus.text = "Download complete!"
+                        txtDownloadPercent.text = "100%"
+                        progressDownload.progress = 100
+                        showOpenDialog(outFile)
+                    }
                 }
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                handler.post {
+                withContext(Dispatchers.Main) {
                     isDownloading = false
-                    txtDownloadStatus.text = "Download failed: ${e.message}"
-                    Toast.makeText(this, "Download failed", Toast.LENGTH_LONG).show()
+                    txtDownloadStatus.text = "Download failed"
+                    Toast.makeText(this@VideoDownloaderActivity, e.message, Toast.LENGTH_LONG).show()
                 }
             }
         }
-
-        currentDownloadThread?.start()
     }
 
-    private fun showOpenInGalleryDialog() {
+    private fun showOpenDialog(file: File) {
         AlertDialog.Builder(this)
-            .setTitle("Open in Gallery")
-            .setMessage("Your video has been downloaded. Do you want to open it now?")
-            .setPositiveButton("Open") { _, _ ->
-                openVideoInGallery()
-            }
+            .setTitle("Download Complete")
+            .setMessage("File: ${file.name}\n\nOpen now?")
+            .setPositiveButton("Open") { _, _ -> openVideo(file) }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun openVideoInGallery() {
-        val uri = lastDownloadedUri
+    private fun openVideo(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                file
+            )
 
-        if (uri != null) {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "video/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             startActivity(intent)
-        } else {
-            // Fallback: open generic video picker
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                type = "video/*"
-            }
-            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Error opening video", Toast.LENGTH_LONG).show()
         }
-    }
-
-    // ===== Helpers for nice text output =====
-
-    private fun humanReadableSpeed(bytesPerSec: Double): String {
-        if (bytesPerSec <= 0.0) return "0 KB/s"
-
-        val kilo = 1024.0
-        val mega = kilo * 1024
-        val giga = mega * 1024
-
-        return when {
-            bytesPerSec >= giga -> String.format("%.2f GB/s", bytesPerSec / giga)
-            bytesPerSec >= mega -> String.format("%.2f MB/s", bytesPerSec / mega)
-            bytesPerSec >= kilo -> String.format("%.2f KB/s", bytesPerSec / kilo)
-            else -> String.format("%.0f B/s", bytesPerSec)
-        }
-    }
-
-    private fun humanReadableSize(bytes: Long): String {
-        if (bytes < 1024) return "$bytes B"
-        val z = (63 - java.lang.Long.numberOfLeadingZeros(bytes)) / 10
-        return String.format(
-            "%.1f %sB",
-            bytes.toDouble() / (1L shl (z * 10)),
-            " KMGTPE"[z]
-        )
     }
 }

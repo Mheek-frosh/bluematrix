@@ -5,8 +5,6 @@ plugins {
 
 android {
     namespace = "com.example.bluematrix"
-
-    // just an Int, no block, no release()
     compileSdk = 36
 
     defaultConfig {
@@ -45,14 +43,15 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)
 
-    // Image loading for thumbnails
+    // OkHttp for network calls
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Jsoup for HTML parsing
+    implementation("org.jsoup:jsoup:1.17.2")
 
-    // OkHttp (used for actual video download)
-    implementation("com.squareup.okhttp3:okhttp:5.3.2")
-
-    // Volley (alternative HTTP library)
-    implementation("com.android.volley:volley:1.2.1")
+    // Coroutines for async operations
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
 
     // Tests
     testImplementation(libs.junit)
